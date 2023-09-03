@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <ignition/gazebo/components/AngularVelocity.hh>
+#include <ignition/gazebo/components/Altimeter.hh>
 #include <ignition/gazebo/components/Imu.hh>
 #include <ignition/gazebo/components/JointForce.hh>
 #include <ignition/gazebo/components/JointForceCmd.hh>
@@ -112,6 +113,30 @@ void ImuData::OnIMU(const ignition::msgs::IMU & _msg)
   this->imu_sensor_data_[9] = _msg.linear_acceleration().z();
 }
 
+class AltimeterData
+{
+public:
+  /// \brief altimeter's name.
+  std::string name{};
+
+  /// \brief altimeter's topic name.
+  std::string topicName{};
+
+  /// \brief handles to the altimeter from within Gazebo
+  ignition::gazebo::Entity sim_altimeter_sensors_ = ignition::gazebo::kNullEntity;
+
+  /// \brief Altimeter measured altitude
+  double altitude_;
+
+  /// \brief callback to get the IMU topic values
+  void OnAltimeter(const ignition::msgs::Altimeter & _msg);
+};
+
+void AltimeterData::OnAltimeter(const ignition::msgs::Altimeter & _msg)
+{
+  this->altitude_ = _msg.vertical_position();
+}
+
 class ign_ros2_control::IgnitionSystemPrivate
 {
 public:
@@ -129,6 +154,9 @@ public:
 
   /// \brief vector with the imus .
   std::vector<std::shared_ptr<ImuData>> imus_;
+
+  /// \brief vector with the altimeters .
+  std::vector<std::shared_ptr<AltimeterData>> altimeters_;
 
   /// \brief state interfaces that will be exported to the Resource Manager
   std::vector<hardware_interface::StateInterface> state_interfaces_;
@@ -381,6 +409,8 @@ void IgnitionSystem::registerSensors(
   size_t n_sensors = hardware_info.sensors.size();
   std::vector<hardware_interface::ComponentInfo> sensor_components_;
 
+  RCLCPP_INFO_STREAM(this->nh_->get_logger(), "Number of sensors: " << n_sensors);
+
   for (unsigned int j = 0; j < n_sensors; j++) {
     hardware_interface::ComponentInfo component = hardware_info.sensors[j];
     sensor_components_.push_back(component);
@@ -441,6 +471,51 @@ void IgnitionSystem::registerSensors(
       this->dataPtr->imus_.push_back(imuData);
       return true;
     });
+
+    // Same for altimeter
+    this->dataPtr->ecm->Each<ignition::gazebo::components::Altimeter,
+      ignition::gazebo::components::Name>(
+      [&](const ignition::gazebo::Entity & _entity,
+      const ignition::gazebo::components::Altimeter *,
+      const ignition::gazebo::components::Name * _name) -> bool
+      {
+        auto altimeterData = std::make_shared<AltimeterData>();
+        RCLCPP_INFO_STREAM(this->nh_->get_logger(), "Loading sensor: " << _name->Data());
+
+        auto sensorTopicComp = this->dataPtr->ecm->Component<
+          ignition::gazebo::components::SensorTopic>(_entity);
+        if (sensorTopicComp) {
+          RCLCPP_INFO_STREAM(this->nh_->get_logger(), "Topic name: " << sensorTopicComp->Data());
+        }
+
+        RCLCPP_INFO_STREAM(
+          this->nh_->get_logger(), "\tState:");
+        altimeterData->name = _name->Data();
+        altimeterData->sim_altimeter_sensors_ = _entity;
+
+        hardware_interface::ComponentInfo component;
+        for (auto & comp : sensor_components_) {
+          if (comp.name == _name->Data()) {
+            component = comp;
+          }
+        }
+
+        for (const auto & state_interface : component.state_interfaces) {
+          RCLCPP_INFO_STREAM(this->nh_->get_logger(), "\t\t " << state_interface.name);
+
+          if (state_interface.name == "depth") {
+            this->dataPtr->state_interfaces_.emplace_back(
+              altimeterData->name,
+              state_interface.name,
+              &altimeterData->altitude_);
+            RCLCPP_INFO_STREAM(
+              this->nh_->get_logger(), "Altimeter " << altimeterData->name <<
+                " has an altitude interface");
+          }
+        }
+        this->dataPtr->altimeters_.push_back(altimeterData);
+        return true;
+      });
 }
 
 CallbackReturn
@@ -512,6 +587,7 @@ hardware_interface::return_type IgnitionSystem::read(
     // this->dataPtr->joint_effort_[j] = jointForce->Data()[0];
   }
 
+  // IMU reading data
   for (unsigned int i = 0; i < this->dataPtr->imus_.size(); ++i) {
     if (this->dataPtr->imus_[i]->topicName.empty()) {
       auto sensorTopicComp = this->dataPtr->ecm->Component<
@@ -525,6 +601,24 @@ hardware_interface::return_type IgnitionSystem::read(
         this->dataPtr->node.Subscribe(
           this->dataPtr->imus_[i]->topicName, &ImuData::OnIMU,
           this->dataPtr->imus_[i].get());
+      }
+    }
+  }
+
+  // Altimeters reading data
+  for (unsigned int i = 0; i < this->dataPtr->altimeters_.size(); ++i) {
+    if (this->dataPtr->altimeters_[i]->topicName.empty()) {
+      auto sensorTopicComp = this->dataPtr->ecm->Component<
+        ignition::gazebo::components::SensorTopic>(this->dataPtr->altimeters_[i]->sim_altimeter_sensors_);
+      if (sensorTopicComp) {
+        this->dataPtr->altimeters_[i]->topicName = sensorTopicComp->Data();
+        RCLCPP_INFO_STREAM(
+          this->nh_->get_logger(), "Altimeter " << this->dataPtr->altimeters_[i]->name <<
+            " has a topic name: " << sensorTopicComp->Data());
+
+        this->dataPtr->node.Subscribe(
+          this->dataPtr->altimeters_[i]->topicName, &AltimeterData::OnAltimeter,
+          this->dataPtr->altimeters_[i].get());
       }
     }
   }
