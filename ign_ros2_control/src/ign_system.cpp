@@ -134,7 +134,7 @@ public:
 
 void AltimeterData::OnAltimeter(const ignition::msgs::Altimeter & _msg)
 {
-  this->altitude_ = _msg.vertical_position();
+  this->altitude_ = -_msg.vertical_position();
 }
 
 class ign_ros2_control::IgnitionSystemPrivate
